@@ -1,24 +1,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <readline/history.h>
 #include <readline/readline.h>
+#include <readline/history.h>
+#include "token.h"
+#include "lexer.h"
+#include "history.h"
 
 int main(void)
 {
-    printf("=========================\n");
-    printf(" Welcome to Shellforge\n");
-    printf("=========================\n");
+    printf("Shellforge\n");
+    printf("A Unix Style Shell written in C\n\n");
 
     char *line;
+    token_list_t list;
+
     while (1)
     {
-        line = readline("shellforge> ");
+        line = readline("shellforge$ ");
         if (line == NULL)
         {
-            printf("\nClosing Shellforge...\n");
+            printf("\nExiting...\n");
             break;
         }
+
         if (strlen(line) == 0)
         {
             free(line);
@@ -26,14 +31,30 @@ int main(void)
         }
 
         add_history(line);
+        history_add(line);
+
         if (strcmp(line, "exit") == 0)
         {
             free(line);
-            printf("Closing Shellforge...\n");
+            printf("Exiting...\n");
             break;
         }
-        printf("Command entered : %s\n", line);
+
+        if (strcmp(line, "history") == 0)
+        {
+            history_print();
+            free(line);
+            continue;
+        }
+
+        if (lexer(line, &list) == 0)
+        {
+            token_print(&list);
+        }
+
         free(line);
     }
+
+    history_free();
     return 0;
 }
