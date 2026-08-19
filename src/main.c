@@ -8,6 +8,7 @@
 #include "history.h"
 #include "parser.h"
 #include "expand.h"
+#include "builtin.h"
 
 int main(void)
 {
@@ -46,14 +47,20 @@ int main(void)
             {
                 expand_variables(&pipeline);
                 pipeline_print(&pipeline);
-            }
-        }
 
-        if (strcmp(line, "exit") == 0)
-        {
-            free(line);
-            printf("Exiting...\n");
-            break;
+                // Built-ins run in the shell process, after the token/pipeline report
+                if (pipeline.command_count == 1 &&
+                    pipeline.commands[0].argc > 0 &&
+                    is_builtin(pipeline.commands[0].argv[0]))
+                {
+                    // execute_builtin returns 1 to exit the shell
+                    if (execute_builtin(&pipeline.commands[0]))
+                    {
+                        free(line);
+                        break;
+                    }
+                }
+            }
         }
 
         if (strcmp(line, "history") == 0)

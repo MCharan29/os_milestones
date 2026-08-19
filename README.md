@@ -11,13 +11,15 @@ shellforge/
 │   ├── lexer.h     # Lexical analyzer interface
 │   ├── history.h   # In-memory history tracking interface
 │   ├── parser.h    # Parser structures and pipeline interface
-│   └── expand.h    # Variable expansion interface
+│   ├── expand.h    # Variable expansion interface
+│   └── builtin.h   # Built-in command interface
 ├── src/
 │   ├── token.c     # Token data structure implementation & printing
 │   ├── lexer.c     # Lexical scanner implementation with quote/escape handling
 │   ├── history.c   # Command history implementation
 │   ├── parser.c    # Parser & pipeline construction and printing
 │   ├── expand.c    # Environment variable expansion ($NAME / ${NAME})
+│   ├── builtin.c   # Built-in commands (cd, pwd, echo, exit) implementation
 │   └── main.c      # Shell REPL, banner, readline loop & built-in execution
 ├── docs/           # Documentation and design specifications
 ├── tests/          # Unit tests and validation scripts
@@ -60,6 +62,20 @@ shellforge/
    - Full lex → token print → parse → expand → pipeline print flow on every command.
    - Exact banner and token/pipeline output formats.
    - Ctrl+D exits with `Goodbye!`; built-in `exit` prints `Exiting...`; `history` builtin retained.
+
+## Milestone 3.1 Features Implemented
+
+1. **Built-in Commands (`builtin.h` / `builtin.c`)**:
+   - Built-in commands `cd`, `pwd`, `echo`, and `exit` executed by the shell process itself, without `fork()`.
+   - `cd` changes the current working directory, defaulting to `HOME` when no argument is given, with graceful error reporting for invalid directories.
+   - `pwd` prints the current working directory via `getcwd()`.
+   - `echo` prints its arguments joined by single spaces.
+   - `exit` terminates the shell through a return code to the main loop, without printing `Exiting...`.
+
+2. **REPL Integration (`main.c`)**:
+   - Built-in dispatch runs after the token and pipeline report, only for single-command pipelines (`command_count == 1`).
+   - Removed the old `strcmp(line, "exit")` handling; `exit` is now a proper built-in.
+   - `history` built-in retained.
 
 ## Build and Run
 
