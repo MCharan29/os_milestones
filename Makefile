@@ -3,7 +3,7 @@ CFLAGS = -Wall -Wextra -std=c11 -Iinclude
 LIBS = -lreadline
 
 TARGET = shellforge
-SRC = src/main.c src/token.c src/lexer.c src/history.c
+SRC = src/main.c src/token.c src/lexer.c src/history.c src/parser.c src/expand.c
 
 all: $(TARGET)
 

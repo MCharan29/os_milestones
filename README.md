@@ -9,11 +9,15 @@ shellforge/
 ├── include/
 │   ├── token.h     # Token definitions, token types, and list declarations
 │   ├── lexer.h     # Lexical analyzer interface
-│   └── history.h   # In-memory history tracking interface
+│   ├── history.h   # In-memory history tracking interface
+│   ├── parser.h    # Parser structures and pipeline interface
+│   └── expand.h    # Variable expansion interface
 ├── src/
 │   ├── token.c     # Token data structure implementation & printing
 │   ├── lexer.c     # Lexical scanner implementation with quote/escape handling
 │   ├── history.c   # Command history implementation
+│   ├── parser.c    # Parser & pipeline construction and printing
+│   ├── expand.c    # Environment variable expansion ($NAME / ${NAME})
 │   └── main.c      # Shell REPL, banner, readline loop & built-in execution
 ├── docs/           # Documentation and design specifications
 ├── tests/          # Unit tests and validation scripts
@@ -39,6 +43,23 @@ shellforge/
    - Welcome banner display.
    - History logging (`add_history` and custom `history` command).
    - Built-in `exit` command handling.
+
+## Milestone 2.2 Features Implemented
+
+1. **Parser (`parser.h` / `parser.c`)**:
+   - Converts the token stream into a structured pipeline (`command_t` / `pipeline_t`) of up to 16 commands with up to 128 arguments each.
+   - Captures input/output redirection (`<`, `>`, `>>`) and background execution (`&`).
+   - Formatted pipeline printing matching exact assignment requirements (`Command 1`, `argv[0] = ls`, aligned `Input` / `Output` / `Append` / `Background` fields).
+   - Graceful error reporting for missing redirection filenames and over-long pipelines (`Parser Error : ...`).
+
+2. **Variable Expansion (`expand.h` / `expand.c`)**:
+   - Expands environment variables in command arguments after parsing (`$NAME` and `${NAME}`) via `getenv()`.
+   - Unset variables expand to the empty string.
+
+3. **REPL Integration (`main.c`)**:
+   - Full lex → token print → parse → expand → pipeline print flow on every command.
+   - Exact banner and token/pipeline output formats.
+   - Ctrl+D exits with `Goodbye!`; built-in `exit` prints `Exiting...`; `history` builtin retained.
 
 ## Build and Run
 

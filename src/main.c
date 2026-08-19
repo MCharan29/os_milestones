@@ -6,21 +6,26 @@
 #include "token.h"
 #include "lexer.h"
 #include "history.h"
+#include "parser.h"
+#include "expand.h"
 
 int main(void)
 {
-    printf("Shellforge\n");
-    printf("A Unix Style Shell written in C\n\n");
+    printf("=====================================\n");
+    printf("      Shellforge\n");
+    printf(" A Unix Style Shell written in C\n");
+    printf("=====================================\n");
 
     char *line;
-    token_list_t list;
+    token_list_t tokens;
+    pipeline_t pipeline;
 
     while (1)
     {
         line = readline("shellforge$ ");
         if (line == NULL)
         {
-            printf("\nExiting...\n");
+            printf("\nGoodbye!\n");
             break;
         }
 
@@ -32,6 +37,17 @@ int main(void)
 
         add_history(line);
         history_add(line);
+
+        if (lexer(line, &tokens) == 0)
+        {
+            token_print(&tokens);
+
+            if (parse(&tokens, &pipeline))
+            {
+                expand_variables(&pipeline);
+                pipeline_print(&pipeline);
+            }
+        }
 
         if (strcmp(line, "exit") == 0)
         {
@@ -45,11 +61,6 @@ int main(void)
             history_print();
             free(line);
             continue;
-        }
-
-        if (lexer(line, &list) == 0)
-        {
-            token_print(&list);
         }
 
         free(line);

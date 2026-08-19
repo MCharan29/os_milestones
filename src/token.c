@@ -53,9 +53,10 @@ void token_print(const token_list_t *list)
         return;
     }
 
-    printf("-------------- TOKENS -------------\n");
+    printf("\n------------- TOKENS -------------\n");
     for (int i = 0; i < list->count; i++)
     {
-        printf("%d : %s %s\n", i, token_name(list->tokens[i].type), list->tokens[i].text);
+        printf(" %d : %-13s%s\n", i, token_name(list->tokens[i].type), list->tokens[i].text);
     }
+    printf("----------------------------------\n");
 }
