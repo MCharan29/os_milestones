@@ -9,6 +9,7 @@
 #include "parser.h"
 #include "expand.h"
 #include "builtin.h"
+#include "executor.h"
 
 int main(void)
 {
@@ -59,6 +60,12 @@ int main(void)
                         free(line);
                         break;
                     }
+                }
+                else if (pipeline.command_count == 1 &&
+                         pipeline.commands[0].argc > 0)
+                {
+                    // External commands run in a forked child process
+                    execute_external(&pipeline.commands[0]);
                 }
             }
         }

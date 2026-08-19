@@ -12,7 +12,8 @@ shellforge/
 │   ├── history.h   # In-memory history tracking interface
 │   ├── parser.h    # Parser structures and pipeline interface
 │   ├── expand.h    # Variable expansion interface
-│   └── builtin.h   # Built-in command interface
+│   ├── builtin.h   # Built-in command interface
+│   └── executor.h  # External command execution interface
 ├── src/
 │   ├── token.c     # Token data structure implementation & printing
 │   ├── lexer.c     # Lexical scanner implementation with quote/escape handling
@@ -20,6 +21,7 @@ shellforge/
 │   ├── parser.c    # Parser & pipeline construction and printing
 │   ├── expand.c    # Environment variable expansion ($NAME / ${NAME})
 │   ├── builtin.c   # Built-in commands (cd, pwd, echo, exit) implementation
+│   ├── executor.c  # External command execution via fork/execvp/waitpid
 │   └── main.c      # Shell REPL, banner, readline loop & built-in execution
 ├── docs/           # Documentation and design specifications
 ├── tests/          # Unit tests and validation scripts
@@ -76,6 +78,18 @@ shellforge/
    - Built-in dispatch runs after the token and pipeline report, only for single-command pipelines (`command_count == 1`).
    - Removed the old `strcmp(line, "exit")` handling; `exit` is now a proper built-in.
    - `history` built-in retained.
+
+## Milestone 3.2 Features Implemented
+
+1. **External Command Execution (`executor.h` / `executor.c`)**:
+   - External commands executed via `fork()` + `execvp()` + `waitpid()`.
+   - The child process replaces its image with `execvp()`; on failure it reports the error with `perror()` and exits with `exit(1)`.
+   - The parent process waits for the child with `waitpid()` and collects its exit status.
+   - `fork()` failure is reported with `perror()`.
+
+2. **REPL Integration (`main.c`)**:
+   - Built-in commands are still handled in-process; only non-built-in commands go through `fork()`/`execvp()`.
+   - External execution runs after the token and pipeline report, only for single-command input (`command_count == 1`).
 
 ## Build and Run
 
