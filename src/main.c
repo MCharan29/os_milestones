@@ -40,6 +40,14 @@ int main(void)
         add_history(line);
         history_add(line);
 
+        // Custom history command: handled in-process, never forked
+        if (strcmp(line, "history") == 0)
+        {
+            history_print();
+            free(line);
+            continue;
+        }
+
         if (lexer(line, &tokens) == 0)
         {
             token_print(&tokens);
@@ -49,10 +57,15 @@ int main(void)
                 expand_variables(&pipeline);
                 pipeline_print(&pipeline);
 
-                // Built-ins run in the shell process, after the token/pipeline report
+                // Built-ins run in the shell process, after the token/pipeline
+                // report, but only when there is no redirection or background
+                // (those need a forked child so the redirection takes effect)
                 if (pipeline.command_count == 1 &&
                     pipeline.commands[0].argc > 0 &&
-                    is_builtin(pipeline.commands[0].argv[0]))
+                    is_builtin(pipeline.commands[0].argv[0]) &&
+                    pipeline.commands[0].input[0] == '\0' &&
+                    pipeline.commands[0].output[0] == '\0' &&
+                    pipeline.commands[0].background == 0)
                 {
                     // execute_builtin returns 1 to exit the shell
                     if (execute_builtin(&pipeline.commands[0]))
@@ -61,20 +74,13 @@ int main(void)
                         break;
                     }
                 }
-                else if (pipeline.command_count == 1 &&
+                else if (pipeline.command_count > 1 ||
                          pipeline.commands[0].argc > 0)
                 {
-                    // External commands run in a forked child process
-                    execute_external(&pipeline.commands[0]);
+                    // Pipelines run via pipe/dup2/fork/execvp/waitpid.
+                    execute_pipeline(&pipeline);
                 }
             }
-        }
-
-        if (strcmp(line, "history") == 0)
-        {
-            history_print();
-            free(line);
-            continue;
         }
 
         free(line);

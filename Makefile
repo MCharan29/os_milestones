@@ -13,6 +13,9 @@ $(TARGET): $(SRC)
 run: $(TARGET)
 	./$(TARGET)
 
+test: $(TARGET)
+	bash tests/run_tests.sh
+
 clean:
 	rm -f $(TARGET)
 

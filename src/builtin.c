@@ -63,6 +63,7 @@ static int builtin_pwd(command_t *cmd)
     else
     {
         printf("%s\n", cwd);
+        printf("2500030215\n");
     }
 
     return 0;

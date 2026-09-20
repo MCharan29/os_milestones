@@ -13,7 +13,7 @@ shellforge/
 │   ├── parser.h    # Parser structures and pipeline interface
 │   ├── expand.h    # Variable expansion interface
 │   ├── builtin.h   # Built-in command interface
-│   └── executor.h  # External command execution interface
+│   └── executor.h  # Pipeline execution interface
 ├── src/
 │   ├── token.c     # Token data structure implementation & printing
 │   ├── lexer.c     # Lexical scanner implementation with quote/escape handling
@@ -21,14 +21,14 @@ shellforge/
 │   ├── parser.c    # Parser & pipeline construction and printing
 │   ├── expand.c    # Environment variable expansion ($NAME / ${NAME})
 │   ├── builtin.c   # Built-in commands (cd, pwd, echo, exit) implementation
-│   ├── executor.c  # External command execution via fork/execvp/waitpid
+│   ├── executor.c  # Pipeline execution: fork/execvp/waitpid, pipe/dup2, redirection, background
 │   └── main.c      # Shell REPL, banner, readline loop & built-in execution
 ├── docs/           # Documentation and design specifications
 ├── tests/          # Unit tests and validation scripts
 └── Makefile        # Project build configuration
 ```
 
-## Milestone 2 Features Implemented
+## Lexical Analysis and Tokenization
 
 1. **Tokenization & Data Structures (`token.h` / `token.c`)**:
    - Standardized `token_type_t` enumeration (`TOKEN_WORD`, `TOKEN_PIPE`, `TOKEN_INPUT`, `TOKEN_OUTPUT`, `TOKEN_APPEND`, `TOKEN_BACKGROUND`, `TOKEN_END`).
@@ -48,7 +48,7 @@ shellforge/
    - History logging (`add_history` and custom `history` command).
    - Built-in `exit` command handling.
 
-## Milestone 2.2 Features Implemented
+## Parsing and Variable Expansion
 
 1. **Parser (`parser.h` / `parser.c`)**:
    - Converts the token stream into a structured pipeline (`command_t` / `pipeline_t`) of up to 16 commands with up to 128 arguments each.
@@ -65,7 +65,7 @@ shellforge/
    - Exact banner and token/pipeline output formats.
    - Ctrl+D exits with `Goodbye!`; built-in `exit` prints `Exiting...`; `history` builtin retained.
 
-## Milestone 3.1 Features Implemented
+## Built-in Command Handling
 
 1. **Built-in Commands (`builtin.h` / `builtin.c`)**:
    - Built-in commands `cd`, `pwd`, `echo`, and `exit` executed by the shell process itself, without `fork()`.
@@ -79,7 +79,7 @@ shellforge/
    - Removed the old `strcmp(line, "exit")` handling; `exit` is now a proper built-in.
    - `history` built-in retained.
 
-## Milestone 3.2 Features Implemented
+## Command Execution and Process Management
 
 1. **External Command Execution (`executor.h` / `executor.c`)**:
    - External commands executed via `fork()` + `execvp()` + `waitpid()`.
@@ -90,6 +90,39 @@ shellforge/
 2. **REPL Integration (`main.c`)**:
    - Built-in commands are still handled in-process; only non-built-in commands go through `fork()`/`execvp()`.
    - External execution runs after the token and pipeline report, only for single-command input (`command_count == 1`).
+
+## Process Creation and Background Execution
+
+1. **Process Creation (`executor.h` / `executor.c`)**:
+   - One `fork()`ed child process per command in the pipeline.
+   - Each child replaces its image with `execvp()`; on failure it reports the error with `perror()` and exits with `exit(1)`.
+   - The parent waits for each foreground child with `waitpid()` and collects its exit status.
+   - `fork()` failure is reported with `perror()`.
+
+2. **Background Execution (`&`)**:
+   - When a pipeline ends with `&`, the parent does not wait for the pipeline's children.
+   - Finished background children are reaped with `waitpid(-1, NULL, WNOHANG)` when the next command is executed.
+   - Demonstrated with `sleep`: `sleep 5 &` forks a single child that `execvp()`s into `sleep` while the shell returns to the prompt immediately; the child is reaped lazily on the next command.
+
+3. **System calls used**:
+   - `fork`, `execvp`, `waitpid`, `exit`.
+
+## Pipeline Execution and I/O Redirection
+
+1. **Pipes (`executor.h` / `executor.c`)**:
+   - Consecutive commands are connected with `pipe()`; each child wires its `stdin`/`stdout` with `dup2()` and then closes all pipe file descriptors.
+   - The parent closes its pipe ends so EOF propagates correctly, and collects every child with `waitpid()`.
+   - `pipe()` failures are reported with `perror()`.
+
+2. **I/O Redirection**:
+   - `<` opens the input file with `open(path, O_RDONLY)`.
+   - `>` opens the output file with `open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644)`.
+   - `>>` opens the output file with `open(path, O_WRONLY | O_CREAT | O_APPEND, 0644)`.
+   - Redirections are applied with `dup2()` in the child after pipe wiring, so explicit redirection overrides pipe ends.
+   - `open()` failure is reported with `perror()` and the child exits with `exit(1)`.
+
+3. **System calls used**:
+   - `pipe`, `dup2`, `open`, `close`.
 
 ## Build and Run
 
@@ -109,3 +142,11 @@ To clean build artifacts:
 ```bash
 make clean
 ```
+
+To run the end-to-end test suite:
+```bash
+make test
+# or
+bash tests/run_tests.sh
+```
+The suite covers external execution, redirection (`<`, `>`, `>>`), pipelines, background execution (`&`), built-in commands, and the exec-error path.
