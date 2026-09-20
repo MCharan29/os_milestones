@@ -155,14 +155,15 @@ exits with `exit(1)`, so a failed `execvp` never falls back into shell code.
 by children.
 
 **Waiting and background.** For a foreground pipeline the parent calls
-`waitpid(pid, &status, 0)` once per child. When the pipeline ends with `&`
-the parent does not wait; finished background children are reaped lazily with
-`waitpid(-1, NULL, WNOHANG)` on entry to the next `execute_pipeline()` call.
-`sleep` is the canonical demonstration command for background execution: `sleep 5 &`
-forks a single child, `execvp()`s it into `sleep`, and returns control to the
-prompt immediately, with the child reaped lazily on the next command.
+`waitpid(pid, &status, 0)` once per child. When a command or pipeline ends
+with `&`:
+- The child PID (or first process PID for pipelines) is printed via `[Background PID: <pid>]`.
+- Stdin is redirected from `/dev/null` for commands without explicit input redirection.
+- The parent does not synchronously wait and immediately returns to the shell prompt.
+- Finished background children are reaped asynchronously by a dedicated `SIGCHLD` signal handler installed via `sigaction()` using non-blocking `waitpid(-1, NULL, WNOHANG)`.
+- Signals are blocked around foreground child wait sequences with `sigprocmask()` to eliminate race conditions between foreground waiting and SIGCHLD reaping.
 
-System calls: `fork`, `execvp`, `waitpid`, `exit`.
+System calls: `fork`, `execvp`, `waitpid`, `sigaction`, `sigprocmask`, `open`, `dup2`, `close`, `exit`.
 
 ### Pipeline Execution & I/O Redirection
 
@@ -274,5 +275,6 @@ the clearest demonstration that built-ins execute in-process.
   shell itself) apply only to the plain form.
 - Fixed limits: at most 16 commands per pipeline, 128 arguments per command,
   and 128 characters per token.
-- Background jobs are not tracked: there is no job control and no `jobs`
-  command; background children are only reaped lazily.
+- Background jobs are not tracked: there is no job control (`fg`, `bg`) and no
+  `jobs` command; however, terminated background children are automatically
+  reaped via a SIGCHLD signal handler to prevent zombies.

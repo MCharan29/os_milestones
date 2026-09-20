@@ -100,12 +100,15 @@ shellforge/
    - `fork()` failure is reported with `perror()`.
 
 2. **Background Execution (`&`)**:
-   - When a pipeline ends with `&`, the parent does not wait for the pipeline's children.
-   - Finished background children are reaped with `waitpid(-1, NULL, WNOHANG)` when the next command is executed.
-   - Demonstrated with `sleep`: `sleep 5 &` forks a single child that `execvp()`s into `sleep` while the shell returns to the prompt immediately; the child is reaped lazily on the next command.
+   - When a command or pipeline ends with `&`, the parent does not wait for the children.
+   - For single background commands, the child PID is reported via `[Background PID: <pid>]`.
+   - For background pipelines, the PID of the first process is reported via `[Background PID: <pid>]`.
+   - In background processes without explicit input redirection, `stdin` is redirected from `/dev/null` using `open()` and `dup2()` to prevent accidental terminal reads.
+   - Finished background children are reaped asynchronously via a `SIGCHLD` signal handler installed with `sigaction()`, using non-blocking `waitpid(-1, NULL, WNOHANG)` to prevent zombie accumulation.
+   - Signals are safely blocked around foreground wait sequences to protect synchronous waiting.
 
 3. **System calls used**:
-   - `fork`, `execvp`, `waitpid`, `exit`.
+   - `fork`, `execvp`, `waitpid`, `sigaction`, `sigprocmask`, `open`, `dup2`, `close`, `exit`.
 
 ## Pipeline Execution and I/O Redirection
 

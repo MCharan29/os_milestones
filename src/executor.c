@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -69,6 +70,52 @@ static void close_all_pipes(int pipes[][2], int pipe_count)
 }
 
 /*
+ * Redirect stdin from /dev/null.
+ * Used in background children that have no explicit input redirection,
+ * so they do not inadvertently read from the terminal.
+ */
+static int redirect_stdin_devnull(void)
+{
+    int fd = open("/dev/null", O_RDONLY);
+    if (fd < 0)
+    {
+        perror("/dev/null");
+        return -1;
+    }
+
+    if (dup2(fd, STDIN_FILENO) < 0)
+    {
+        perror("dup2");
+        close_fd(&fd);
+        return -1;
+    }
+
+    close_fd(&fd);
+    return 0;
+}
+
+/*
+ * Block SIGCHLD and save the previous signal mask.
+ * Used around foreground fork+wait sequences to prevent the SIGCHLD
+ * handler from accidentally reaping a foreground child.
+ */
+static void block_sigchld(sigset_t *old)
+{
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &mask, old);
+}
+
+/*
+ * Restore a previously saved signal mask.
+ */
+static void restore_sigmask(const sigset_t *old)
+{
+    sigprocmask(SIG_SETMASK, old, NULL);
+}
+
+/*
  * Wait for a specific child PID, automatically retrying on EINTR.
  */
 static int wait_one(pid_t pid, int *status)
@@ -97,13 +144,37 @@ static int wait_one(pid_t pid, int *status)
 }
 
 /*
- * Reap any terminated background processes to avoid accumulating zombies.
+ * SIGCHLD handler: reap terminated background children.
+ * Uses only async-signal-safe operations and preserves errno.
  */
-static void reap_background_jobs(void)
+static void sigchld_handler(int sig)
 {
+    (void)sig;
+    int saved_errno = errno;
+
     while (waitpid(-1, NULL, WNOHANG) > 0)
     {
-        /* Keep reaping until no more terminated children remain */
+        /* Reap all available terminated children */
+    }
+
+    errno = saved_errno;
+}
+
+/*
+ * Install the SIGCHLD handler using sigaction().
+ * SA_RESTART prevents interrupted slow syscalls from failing with EINTR.
+ * SA_NOCLDSTOP avoids signals when children are merely stopped.
+ */
+void install_sigchld_handler(void)
+{
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+
+    if (sigaction(SIGCHLD, &sa, NULL) < 0)
+    {
+        perror("sigaction");
     }
 }
 
@@ -167,6 +238,15 @@ static int apply_redirections(const command_t *cmd)
  * to modify shell state (e.g. cd).
  * For external commands or commands with redirection / background, executes
  * in a forked child process with execvp() or child builtin dispatch.
+ *
+ * Background commands:
+ *   - stdin is redirected from /dev/null unless explicit input redirection
+ *   - the child PID is reported
+ *   - the parent does not wait
+ *
+ * Foreground commands:
+ *   - SIGCHLD is blocked to prevent the handler from reaping the child
+ *   - the parent waits and returns the exit status
  */
 int execute_command(command_t *cmd)
 {
@@ -174,9 +254,6 @@ int execute_command(command_t *cmd)
     {
         return -1;
     }
-
-    /* Reap any background jobs */
-    reap_background_jobs();
 
     /*
      * Plain built-in commands with no redirection running in foreground
@@ -190,6 +267,15 @@ int execute_command(command_t *cmd)
         return execute_builtin(cmd);
     }
 
+    int is_fg = !cmd->background;
+    sigset_t old_mask;
+
+    /* Block SIGCHLD for foreground commands to protect waitpid */
+    if (is_fg)
+    {
+        block_sigchld(&old_mask);
+    }
+
     fflush(stdout);
 
     pid_t pid = fork();
@@ -197,12 +283,34 @@ int execute_command(command_t *cmd)
     if (pid < 0)
     {
         perror("fork");
+        if (is_fg)
+        {
+            restore_sigmask(&old_mask);
+        }
         return -1;
     }
 
     if (pid == 0)
     {
-        /* Child: apply I/O redirections */
+        /* Restore default signal mask in child */
+        if (is_fg)
+        {
+            restore_sigmask(&old_mask);
+        }
+
+        /*
+         * Background: redirect stdin from /dev/null when the user
+         * did not specify explicit input redirection.
+         */
+        if (cmd->background && cmd->input[0] == '\0')
+        {
+            if (redirect_stdin_devnull() < 0)
+            {
+                _exit(1);
+            }
+        }
+
+        /* Apply I/O redirections */
         if (apply_redirections(cmd) < 0)
         {
             _exit(1);
@@ -222,25 +330,39 @@ int execute_command(command_t *cmd)
         _exit(127);
     }
 
-    /* Parent: if background (&), do not wait */
+    /* Parent: background — report PID and return immediately */
     if (cmd->background)
     {
+        fprintf(stderr, "[Background PID: %d]\n", (int)pid);
         return 0;
     }
 
-    /* Wait for child process and return exit status */
+    /* Foreground: wait for child process and return exit status */
     int status = 0;
     if (wait_one(pid, &status) < 0)
     {
         perror("waitpid");
+        restore_sigmask(&old_mask);
         return -1;
     }
 
+    restore_sigmask(&old_mask);
     return status_to_exit_code(status);
 }
 
 /*
  * Execute a pipeline of one or more commands.
+ *
+ * Background pipelines:
+ *   - the first command's stdin is redirected from /dev/null when
+ *     no explicit input redirection exists
+ *   - the PID of the first process is reported
+ *   - the parent does not wait
+ *
+ * Foreground pipelines:
+ *   - SIGCHLD is blocked to prevent the handler from reaping children
+ *   - all children are waited for
+ *   - the exit status of the final command is returned
  */
 int execute_pipeline(pipeline_t *pipeline)
 {
@@ -254,9 +376,6 @@ int execute_pipeline(pipeline_t *pipeline)
     {
         return execute_command(&pipeline->commands[0]);
     }
-
-    /* Reap any background children from previous commands */
-    reap_background_jobs();
 
     int command_count = pipeline->command_count;
     if (command_count > MAX_COMMANDS)
@@ -276,6 +395,13 @@ int execute_pipeline(pipeline_t *pipeline)
         }
     }
 
+    /* Block SIGCHLD for foreground pipelines to protect waitpid */
+    sigset_t old_mask;
+    if (!is_background)
+    {
+        block_sigchld(&old_mask);
+    }
+
     /* Allocate and create pipes for multi-stage pipelines */
     int pipes[MAX_COMMANDS - 1][2];
     const int pipe_count = command_count - 1;
@@ -292,6 +418,10 @@ int execute_pipeline(pipeline_t *pipeline)
         {
             perror("pipe");
             close_all_pipes(pipes, i);
+            if (!is_background)
+            {
+                restore_sigmask(&old_mask);
+            }
             return -1;
         }
     }
@@ -314,6 +444,10 @@ int execute_pipeline(pipeline_t *pipeline)
                 (void)wait_one(pids[j], &ignored);
             }
 
+            if (!is_background)
+            {
+                restore_sigmask(&old_mask);
+            }
             return -1;
         }
 
@@ -333,11 +467,21 @@ int execute_pipeline(pipeline_t *pipeline)
                 (void)wait_one(pids[j], &ignored);
             }
 
+            if (!is_background)
+            {
+                restore_sigmask(&old_mask);
+            }
             return -1;
         }
 
         if (pid == 0)
         {
+            /* Restore default signal mask in child */
+            if (!is_background)
+            {
+                restore_sigmask(&old_mask);
+            }
+
             /*
              * Pipe wiring:
              * - Intermediate / last stages read from previous pipe
@@ -363,6 +507,19 @@ int execute_pipeline(pipeline_t *pipeline)
 
             /* Close all pipe file descriptors in the child */
             close_all_pipes(pipes, pipe_count);
+
+            /*
+             * Background: redirect stdin from /dev/null for the first
+             * command when there is no explicit input redirection and
+             * stdin is not already wired to a pipe.
+             */
+            if (is_background && i == 0 && cmd->input[0] == '\0')
+            {
+                if (redirect_stdin_devnull() < 0)
+                {
+                    _exit(1);
+                }
+            }
 
             /*
              * Apply file redirections (<, >, >>).
@@ -403,10 +560,11 @@ int execute_pipeline(pipeline_t *pipeline)
     close_all_pipes(pipes, pipe_count);
 
     /*
-     * If running in the background (&), do not block. Return immediately.
+     * Background: report first process PID and return immediately.
      */
     if (is_background)
     {
+        fprintf(stderr, "[Background PID: %d]\n", (int)pids[0]);
         return 0;
     }
 
@@ -431,6 +589,7 @@ int execute_pipeline(pipeline_t *pipeline)
         }
     }
 
+    restore_sigmask(&old_mask);
     return last_status;
 }
 

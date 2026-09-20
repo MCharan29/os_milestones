@@ -13,6 +13,8 @@
 
 int main(void)
 {
+    install_sigchld_handler();
+
     printf("=====================================\n");
     printf("      Shellforge\n");
     printf(" A Unix Style Shell written in C\n");

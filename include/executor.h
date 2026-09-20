@@ -36,4 +36,10 @@ int execute_command(command_t *cmd);
  */
 int execute_pipeline(pipeline_t *pipeline);
 
+/*
+ * Install a SIGCHLD handler that reaps terminated background children.
+ * Must be called once during shell initialization, before the REPL loop.
+ */
+void install_sigchld_handler(void);
+
 #endif /* EXECUTOR_H */
