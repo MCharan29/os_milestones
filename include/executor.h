@@ -1,13 +1,14 @@
 #ifndef EXECUTOR_H
 #define EXECUTOR_H
 
+#include <sys/types.h>
 #include "parser.h"
 
 /*
- * Legacy external command execution interface (fork + execvp + waitpid).
- * Retained for backward compatibility.
+ * Return the shell's own process group ID.
+ * Defined in job_control.c.
  */
-void execute_external(command_t *cmd);
+pid_t job_control_shell_pgid(void);
 
 /*
  * Execute a single command.
@@ -18,7 +19,7 @@ void execute_external(command_t *cmd);
  *
  * Returns the command exit status (0-255), or -1 on error.
  */
-int execute_command(command_t *cmd);
+int execute_command(command_t *cmd, const char *cmdline);
 
 /*
  * Execute a pipeline of one or more commands.
@@ -28,18 +29,16 @@ int execute_command(command_t *cmd);
  *   - Program execution with execvp()
  *   - Multi-stage pipelines with pipe() and dup2()
  *   - File redirection (<, >, >>) with open() and dup2()
- *   - Background execution (&) and zombie reaping
- *   - Waiting for all children with waitpid()
+ *   - Background execution (&) with jobs table integration
+ *   - Foreground wait with WUNTRACED for Ctrl+Z support
+ *   - Terminal control via tcsetpgrp()
+ *   - Process group creation via setpgid()
  *   - Proper descriptor closing in parent and children
+ *
+ * cmdline: the original command-line string, stored in the jobs table.
  *
  * Returns the exit status of the final pipeline stage, or -1 on error.
  */
-int execute_pipeline(pipeline_t *pipeline);
-
-/*
- * Install a SIGCHLD handler that reaps terminated background children.
- * Must be called once during shell initialization, before the REPL loop.
- */
-void install_sigchld_handler(void);
+int execute_pipeline(pipeline_t *pipeline, const char *cmdline);
 
 #endif /* EXECUTOR_H */

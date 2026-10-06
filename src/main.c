@@ -10,13 +10,16 @@
 #include "expand.h"
 #include "builtin.h"
 #include "executor.h"
+#include "jobs.h"
+#include "job_control.h"
 
 int main(void)
 {
-    install_sigchld_handler();
+    /* Initialize job control: process group, terminal, signals */
+    job_control_init();
 
     printf("=====================================\n");
-    printf("      Shellforge\n");
+    printf("      Shellforge (Job Control Update 2)\n");
     printf(" A Unix Style Shell written in C\n");
     printf("=====================================\n");
 
@@ -26,6 +29,9 @@ int main(void)
 
     while (1)
     {
+        /* Notify about completed/stopped background jobs before prompt */
+        job_notify();
+
         line = readline("shellforge$ ");
         if (line == NULL)
         {
@@ -80,7 +86,8 @@ int main(void)
                          pipeline.commands[0].argc > 0)
                 {
                     // Pipelines run via pipe/dup2/fork/execvp/waitpid.
-                    execute_pipeline(&pipeline);
+                    // Pass the original command line for the jobs table.
+                    execute_pipeline(&pipeline, line);
                 }
             }
         }

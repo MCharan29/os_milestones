@@ -116,7 +116,10 @@ int is_builtin(const char *name)
     return strcmp(name, "cd") == 0
         || strcmp(name, "pwd") == 0
         || strcmp(name, "echo") == 0
-        || strcmp(name, "exit") == 0;
+        || strcmp(name, "exit") == 0
+        || strcmp(name, "jobs") == 0
+        || strcmp(name, "fg") == 0
+        || strcmp(name, "bg") == 0;
 }
 
 int execute_builtin(command_t *cmd)
@@ -141,6 +144,18 @@ int execute_builtin(command_t *cmd)
     if (strcmp(cmd->argv[0], "exit") == 0)
     {
         return builtin_exit(cmd);
+    }
+    if (strcmp(cmd->argv[0], "jobs") == 0)
+    {
+        return builtin_jobs(cmd);
+    }
+    if (strcmp(cmd->argv[0], "fg") == 0)
+    {
+        return builtin_fg(cmd);
+    }
+    if (strcmp(cmd->argv[0], "bg") == 0)
+    {
+        return builtin_bg(cmd);
     }
 
     // Not a builtin; caller should not have called us

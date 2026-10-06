@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -12,6 +13,7 @@
 
 #include "executor.h"
 #include "builtin.h"
+#include "jobs.h"
 
 /*
  * Convert child wait status to shell exit code (0..255).
@@ -95,90 +97,6 @@ static int redirect_stdin_devnull(void)
 }
 
 /*
- * Block SIGCHLD and save the previous signal mask.
- * Used around foreground fork+wait sequences to prevent the SIGCHLD
- * handler from accidentally reaping a foreground child.
- */
-static void block_sigchld(sigset_t *old)
-{
-    sigset_t mask;
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &mask, old);
-}
-
-/*
- * Restore a previously saved signal mask.
- */
-static void restore_sigmask(const sigset_t *old)
-{
-    sigprocmask(SIG_SETMASK, old, NULL);
-}
-
-/*
- * Wait for a specific child PID, automatically retrying on EINTR.
- */
-static int wait_one(pid_t pid, int *status)
-{
-    if (pid <= 0 || status == NULL)
-    {
-        return -1;
-    }
-
-    for (;;)
-    {
-        pid_t rc = waitpid(pid, status, 0);
-
-        if (rc == pid)
-        {
-            return 0;
-        }
-
-        if (rc < 0 && errno == EINTR)
-        {
-            continue;
-        }
-
-        return -1;
-    }
-}
-
-/*
- * SIGCHLD handler: reap terminated background children.
- * Uses only async-signal-safe operations and preserves errno.
- */
-static void sigchld_handler(int sig)
-{
-    (void)sig;
-    int saved_errno = errno;
-
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-    {
-        /* Reap all available terminated children */
-    }
-
-    errno = saved_errno;
-}
-
-/*
- * Install the SIGCHLD handler using sigaction().
- * SA_RESTART prevents interrupted slow syscalls from failing with EINTR.
- * SA_NOCLDSTOP avoids signals when children are merely stopped.
- */
-void install_sigchld_handler(void)
-{
-    struct sigaction sa;
-    sa.sa_handler = sigchld_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-
-    if (sigaction(SIGCHLD, &sa, NULL) < 0)
-    {
-        perror("sigaction");
-    }
-}
-
-/*
  * Apply file redirections (<, >, >>) for a command stage.
  * Returns 0 on success, or -1 on error with perror already invoked.
  */
@@ -232,23 +150,33 @@ static int apply_redirections(const command_t *cmd)
 }
 
 /*
- * Execute a single command.
+ * Reset job-control signals to default in child processes.
+ * The shell ignores SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU
+ * so that they only affect the foreground job.  Children must
+ * restore the default actions.
+ */
+static void child_reset_signals(void)
+{
+    signal(SIGINT,  SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+    signal(SIGTSTP, SIG_DFL);
+    signal(SIGTTIN, SIG_DFL);
+    signal(SIGTTOU, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+}
+
+/*
+ * Execute a single command (single-stage pipeline).
  *
  * For plain built-in commands (no redirection, foreground), executes in-process
  * to modify shell state (e.g. cd).
  * For external commands or commands with redirection / background, executes
  * in a forked child process with execvp() or child builtin dispatch.
  *
- * Background commands:
- *   - stdin is redirected from /dev/null unless explicit input redirection
- *   - the child PID is reported
- *   - the parent does not wait
- *
- * Foreground commands:
- *   - SIGCHLD is blocked to prevent the handler from reaping the child
- *   - the parent waits and returns the exit status
+ * Background commands are added to the jobs table.
+ * Foreground commands support Ctrl+Z (SIGTSTP) via WUNTRACED.
  */
-int execute_command(command_t *cmd)
+int execute_command(command_t *cmd, const char *cmdline)
 {
     if (cmd == NULL || cmd->argc <= 0 || cmd->argv[0] == NULL)
     {
@@ -267,14 +195,7 @@ int execute_command(command_t *cmd)
         return execute_builtin(cmd);
     }
 
-    int is_fg = !cmd->background;
-    sigset_t old_mask;
-
-    /* Block SIGCHLD for foreground commands to protect waitpid */
-    if (is_fg)
-    {
-        block_sigchld(&old_mask);
-    }
+    int is_bg = cmd->background;
 
     fflush(stdout);
 
@@ -283,26 +204,30 @@ int execute_command(command_t *cmd)
     if (pid < 0)
     {
         perror("fork");
-        if (is_fg)
-        {
-            restore_sigmask(&old_mask);
-        }
         return -1;
     }
 
     if (pid == 0)
     {
-        /* Restore default signal mask in child */
-        if (is_fg)
+        /* --- Child process --- */
+
+        /* Create a new process group with this child as the leader */
+        setpgid(0, 0);
+
+        /* If foreground, take the terminal (SIGTTOU is currently ignored) */
+        if (!is_bg)
         {
-            restore_sigmask(&old_mask);
+            if (tcsetpgrp(STDIN_FILENO, getpid()) < 0) perror("tcsetpgrp (child pipeline fg)");
         }
+
+        /* Reset signals to default AFTER taking the terminal */
+        child_reset_signals();
 
         /*
          * Background: redirect stdin from /dev/null when the user
          * did not specify explicit input redirection.
          */
-        if (cmd->background && cmd->input[0] == '\0')
+        if (is_bg && cmd->input[0] == '\0')
         {
             if (redirect_stdin_devnull() < 0)
             {
@@ -330,51 +255,92 @@ int execute_command(command_t *cmd)
         _exit(127);
     }
 
-    /* Parent: background — report PID and return immediately */
-    if (cmd->background)
+    /* --- Parent process --- */
+
+    /* Set process group in parent too (avoids race with child) */
+    setpgid(pid, pid);
+
+    if (is_bg)
     {
-        fprintf(stderr, "[Background PID: %d]\n", (int)pid);
+        /* Add to jobs table and report */
+        pid_t pids[] = { pid };
+        int job_id = job_add(pid, pids, 1, cmdline ? cmdline : cmd->argv[0]);
+        if (job_id > 0)
+        {
+            fprintf(stderr, "[%d] %d\n", job_id, (int)pid);
+        }
         return 0;
     }
 
-    /* Foreground: wait for child process and return exit status */
-    int status = 0;
-    if (wait_one(pid, &status) < 0)
+    if (tcsetpgrp(STDIN_FILENO, pid) < 0)
     {
-        perror("waitpid");
-        restore_sigmask(&old_mask);
-        return -1;
+        perror("tcsetpgrp (parent to child)");
     }
 
-    restore_sigmask(&old_mask);
+    /* Wait for child with WUNTRACED so Ctrl+Z is detected */
+    int status = 0;
+    pid_t wpid;
+
+    for (;;)
+    {
+        wpid = waitpid(pid, &status, WUNTRACED);
+
+        if (wpid == pid)
+        {
+            break;
+        }
+
+        if (wpid < 0 && errno == EINTR)
+        {
+            continue;
+        }
+
+        if (wpid < 0)
+        {
+            perror("waitpid");
+            break;
+        }
+    }
+
+    /* Reclaim the terminal for the shell */
+    tcsetpgrp(STDIN_FILENO, job_control_shell_pgid());
+
+    if (WIFSTOPPED(status))
+    {
+        /* Child was stopped (Ctrl+Z) — add to jobs table as stopped */
+        pid_t pids[] = { pid };
+        int job_id = job_add(pid, pids, 1, cmdline ? cmdline : cmd->argv[0]);
+        if (job_id > 0)
+        {
+            job_set_state(job_id, JOB_STOPPED);
+            printf("\n[%d]  Stopped                 %s\n", job_id, cmdline ? cmdline : cmd->argv[0]);
+            job_t *sj = job_find_by_id(job_id);
+            if (sj) sj->notified = 1;
+        }
+        return 128 + WSTOPSIG(status);
+    }
+
     return status_to_exit_code(status);
 }
 
 /*
  * Execute a pipeline of one or more commands.
  *
- * Background pipelines:
- *   - the first command's stdin is redirected from /dev/null when
- *     no explicit input redirection exists
- *   - the PID of the first process is reported
- *   - the parent does not wait
- *
- * Foreground pipelines:
- *   - SIGCHLD is blocked to prevent the handler from reaping children
- *   - all children are waited for
- *   - the exit status of the final command is returned
+ * Background pipelines are added to the jobs table.
+ * Foreground pipelines support Ctrl+Z via WUNTRACED.
+ * All children are placed in the same process group.
  */
-int execute_pipeline(pipeline_t *pipeline)
+int execute_pipeline(pipeline_t *pipeline, const char *cmdline)
 {
     if (pipeline == NULL || pipeline->command_count <= 0)
     {
         return -1;
     }
 
-    /* If only one command, execute it directly via execute_command() */
+    /* If only one command, delegate to execute_command() */
     if (pipeline->command_count == 1)
     {
-        return execute_command(&pipeline->commands[0]);
+        return execute_command(&pipeline->commands[0], cmdline);
     }
 
     int command_count = pipeline->command_count;
@@ -395,13 +361,6 @@ int execute_pipeline(pipeline_t *pipeline)
         }
     }
 
-    /* Block SIGCHLD for foreground pipelines to protect waitpid */
-    sigset_t old_mask;
-    if (!is_background)
-    {
-        block_sigchld(&old_mask);
-    }
-
     /* Allocate and create pipes for multi-stage pipelines */
     int pipes[MAX_COMMANDS - 1][2];
     const int pipe_count = command_count - 1;
@@ -418,16 +377,13 @@ int execute_pipeline(pipeline_t *pipeline)
         {
             perror("pipe");
             close_all_pipes(pipes, i);
-            if (!is_background)
-            {
-                restore_sigmask(&old_mask);
-            }
             return -1;
         }
     }
 
     pid_t pids[MAX_COMMANDS];
     int forked = 0;
+    pid_t pgid = 0;  /* Process group = PID of the first child */
 
     for (int i = 0; i < command_count; ++i)
     {
@@ -438,15 +394,11 @@ int execute_pipeline(pipeline_t *pipeline)
             fprintf(stderr, "executor: empty command at pipeline index %d\n", i);
             close_all_pipes(pipes, pipe_count);
 
+            /* Clean up already-forked children */
             for (int j = 0; j < forked; ++j)
             {
                 int ignored = 0;
-                (void)wait_one(pids[j], &ignored);
-            }
-
-            if (!is_background)
-            {
-                restore_sigmask(&old_mask);
+                waitpid(pids[j], &ignored, 0);
             }
             return -1;
         }
@@ -464,23 +416,33 @@ int execute_pipeline(pipeline_t *pipeline)
             for (int j = 0; j < forked; ++j)
             {
                 int ignored = 0;
-                (void)wait_one(pids[j], &ignored);
-            }
-
-            if (!is_background)
-            {
-                restore_sigmask(&old_mask);
+                waitpid(pids[j], &ignored, 0);
             }
             return -1;
         }
 
         if (pid == 0)
         {
-            /* Restore default signal mask in child */
-            if (!is_background)
+            /* --- Child process --- */
+
+            /* All children in the pipeline share the same process group */
+            if (i == 0)
             {
-                restore_sigmask(&old_mask);
+                setpgid(0, 0);  /* First child: create new group */
             }
+            else
+            {
+                setpgid(0, pgid);  /* Join the first child's group */
+            }
+
+            /* If foreground, take the terminal (SIGTTOU is currently ignored) */
+            if (!is_background && i == 0)
+            {
+                if (tcsetpgrp(STDIN_FILENO, getpid()) < 0) perror("tcsetpgrp (child pipeline fg)");
+            }
+
+            /* Reset signals to default AFTER taking the terminal */
+            child_reset_signals();
 
             /*
              * Pipe wiring:
@@ -550,6 +512,15 @@ int execute_pipeline(pipeline_t *pipeline)
             _exit(127);
         }
 
+        /* --- Parent --- */
+
+        /* Set process group in parent (avoids race) */
+        if (i == 0)
+        {
+            pgid = pid;
+        }
+        setpgid(pid, pgid);
+
         pids[forked++] = pid;
     }
 
@@ -560,28 +531,61 @@ int execute_pipeline(pipeline_t *pipeline)
     close_all_pipes(pipes, pipe_count);
 
     /*
-     * Background: report first process PID and return immediately.
+     * Background: add to jobs table and return immediately.
      */
     if (is_background)
     {
-        fprintf(stderr, "[Background PID: %d]\n", (int)pids[0]);
+        int job_id = job_add(pgid, pids, forked, cmdline ? cmdline : "pipeline");
+        if (job_id > 0)
+        {
+            fprintf(stderr, "[%d] %d\n", job_id, (int)pgid);
+        }
         return 0;
     }
 
     /*
-     * For foreground execution, wait for all children to complete.
-     * Return the exit code of the final command in the pipeline.
+     * Foreground: give the pipeline's process group the terminal.
+     */
+    tcsetpgrp(STDIN_FILENO, pgid);
+
+    /*
+     * Wait for all children.  Use WUNTRACED so we detect Ctrl+Z.
      */
     int last_status = 0;
+    int stopped = 0;
 
     for (int i = 0; i < forked; ++i)
     {
         int status = 0;
+        pid_t wpid;
 
-        if (wait_one(pids[i], &status) < 0)
+        for (;;)
         {
-            perror("waitpid");
-            last_status = -1;
+            wpid = waitpid(pids[i], &status, WUNTRACED);
+
+            if (wpid == pids[i])
+            {
+                break;
+            }
+
+            if (wpid < 0 && errno == EINTR)
+            {
+                continue;
+            }
+
+            if (wpid < 0)
+            {
+                perror("waitpid");
+                last_status = -1;
+                goto wait_done;
+            }
+        }
+
+        if (WIFSTOPPED(status))
+        {
+            stopped = 1;
+            /* Don't wait for remaining processes — they're all stopped */
+            break;
         }
         else if (i == command_count - 1)
         {
@@ -589,14 +593,24 @@ int execute_pipeline(pipeline_t *pipeline)
         }
     }
 
-    restore_sigmask(&old_mask);
-    return last_status;
-}
+wait_done:
+    /* Reclaim the terminal for the shell */
+    tcsetpgrp(STDIN_FILENO, job_control_shell_pgid());
 
-/*
- * Legacy external command runner (retained for backward compatibility).
- */
-void execute_external(command_t *cmd)
-{
-    (void)execute_command(cmd);
+    if (stopped)
+    {
+        /* Pipeline was stopped (Ctrl+Z) — add to jobs table */
+        int job_id = job_add(pgid, pids, forked, cmdline ? cmdline : "pipeline");
+        if (job_id > 0)
+        {
+            job_set_state(job_id, JOB_STOPPED);
+            printf("\n[%d]  Stopped                 %s\n", job_id,
+                   cmdline ? cmdline : "pipeline");
+            job_t *sj = job_find_by_id(job_id);
+            if (sj) sj->notified = 1;
+        }
+        return 128 + SIGTSTP;
+    }
+
+    return last_status;
 }
